@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Padho with Pratyush — Lecture Search</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --border: #262c36;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #ff6b35;
+    --green: #3fb950;
+    --yellow: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 22px 24px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0; font-size: 19px; letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 24px;
+    padding: 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  form { display: flex; gap: 8px; margin-bottom: 18px; }
+  input[type=text] {
+    flex: 1;
+    padding: 11px 13px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 15px;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  button {
+    padding: 11px 18px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .answer {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: 8px;
+    padding: 16px 18px;
+    white-space: pre-wrap;
+  }
+  .answer.refused { border-left-color: var(--yellow); color: var(--yellow); }
+  .answer.empty { border-left-color: var(--border); color: var(--muted); }
+
+  .cite {
+    display: inline-block;
+    background: rgba(255,107,53,0.15);
+    color: var(--accent);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+  }
+  .cite:hover { background: var(--accent); color: #fff; }
+
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 22px 0 8px; }
+
+  .source {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    text-align: left;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 11px 13px;
+    margin-bottom: 8px;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .source:hover { border-color: var(--accent); }
+  .source .n { color: var(--accent); font-weight: 700; font-size: 13px; }
+  .source .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .source .at {
+    font-variant-numeric: tabular-nums;
+    background: var(--bg);
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  #playerWrap {
+    position: sticky;
+    top: 24px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  #playerBox { aspect-ratio: 16 / 9; background: #000; }
+  #playerBox iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #nowPlaying { padding: 11px 14px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--border); }
+  .placeholder {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: var(--muted); font-size: 14px; text-align: center; padding: 20px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Lecture Search</h1>
+  <p>Ask in Hinglish or English. Answers come only from what was actually said in the lectures.</p>
+</header>
+
+<main>
+  <section>
+    <form id="askForm">
+      <input id="q" type="text" maxlength="500" autocomplete="off"
+             placeholder="memoization aur tabulation ka difference kahan explain kiya hai?" />
+      <button id="askBtn" type="submit">Ask</button>
+    </form>
+
+    <div id="answer" class="answer empty">Ask something to get started.</div>
+
+    <h2 id="sourcesLabel" hidden>Sources</h2>
+    <div id="sources"></div>
+  </section>
+
+  <section>
+    <div id="playerWrap">
+      <div id="playerBox"><div class="placeholder">Click a source and the lecture jumps to that exact second, right here.</div></div>
+      <div id="nowPlaying">No lecture loaded.</div>
+    </div>
+  </section>
+</main>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+// ---------------------------------------------------------------
+// YouTube IFrame player. The whole point of this page: citations
+// seek the embedded player instead of opening a new tab.
+// ---------------------------------------------------------------
+let player = null;
+let playerReady = false;
+let pending = null;   // a jump requested before the API finished loading
+
+function onYouTubeIframeAPIReady() {
+  player = new YT.Player('playerBox', {
+    height: '100%', width: '100%',
+    playerVars: { rel: 0, modestbranding: 1, playsinline: 1 },
+    events: {
+      onReady: () => {
+        playerReady = true;
+        if (pending) { jump(pending.videoId, pending.seconds, pending.title); pending = null; }
+      }
+    }
+  });
+}
+
+let currentVideo = null;
+
+function jump(videoId, seconds, title) {
+  if (!playerReady) { pending = { videoId, seconds, title }; return; }
+
+  if (currentVideo === videoId) {
+    // Same lecture already loaded — this is the instant seek.
+    player.seekTo(seconds, true);
+    player.playVideo();
+  } else {
+    player.loadVideoById({ videoId: videoId, startSeconds: seconds });
+    currentVideo = videoId;
+  }
+  document.getElementById('nowPlaying').textContent = `${title} — ${fmt(seconds)}`;
+  document.getElementById('playerWrap').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function fmt(total) {
+  total = Math.max(0, Math.floor(total));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+// ---------------------------------------------------------------
+// Ask
+// ---------------------------------------------------------------
+const form = document.getElementById('askForm');
+const input = document.getElementById('q');
+const askBtn = document.getElementById('askBtn');
+const answerEl = document.getElementById('answer');
+const sourcesEl = document.getElementById('sources');
+const sourcesLabel = document.getElementById('sourcesLabel');
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const question = input.value.trim();
+  if (!question) return;
+
+  askBtn.disabled = true;
+  askBtn.textContent = '…';
+  answerEl.className = 'answer empty';
+  answerEl.textContent = 'Searching the lectures…';
+  sourcesEl.innerHTML = '';
+  sourcesLabel.hidden = true;
+
+  try {
+    const response = await fetch('/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question })
+    });
+
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${response.status}`);
+    }
+
+    render(await response.json());
+  } catch (err) {
+    answerEl.className = 'answer refused';
+    answerEl.textContent = String(err.message || err);
+  } finally {
+    askBtn.disabled = false;
+    askBtn.textContent = 'Ask';
+  }
+});
+
+function render(result) {
+  const citations = result.citations || [];
+
+  answerEl.className = 'answer' + (result.grounded ? '' : ' refused');
+  answerEl.innerHTML = '';
+
+  // Turn every [n] in the answer into a button that seeks the player.
+  const parts = result.answer.split(/(\[\d+\])/g);
+  for (const part of parts) {
+    const match = part.match(/^\[(\d+)\]$/);
+    const citation = match ? citations[Number(match[1]) - 1] : null;
+
+    if (citation) {
+      const span = document.createElement('span');
+      span.className = 'cite';
+      span.textContent = part;
+      span.title = `${citation.title} @ ${citation.timestamp}`;
+      span.onclick = () => jump(citation.video_id, citation.start_sec, citation.title);
+      answerEl.appendChild(span);
+    } else {
+      answerEl.appendChild(document.createTextNode(part));
+    }
+  }
+
+  sourcesLabel.hidden = citations.length === 0;
+  citations.forEach((citation, i) => {
+    const button = document.createElement('button');
+    button.className = 'source';
+    button.type = 'button';
+    button.innerHTML =
+      `<span class="n">[${i + 1}]</span>` +
+      `<span class="title"></span>` +
+      `<span class="at">${citation.timestamp}</span>` +
+      `<span style="color:var(--accent)">▸</span>`;
+    button.querySelector('.title').textContent = citation.title;
+    button.onclick = () => jump(citation.video_id, citation.start_sec, citation.title);
+    sourcesEl.appendChild(button);
+  });
+}
+</script>
+</body>
+</html>
