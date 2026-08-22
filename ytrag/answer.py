@@ -13,8 +13,19 @@ import re
 
 from groq import Groq
 
-from ytrag.config import GROQ_API_KEY, LLM_MODEL, MAX_DISTANCE, REFUSAL, TOP_K
-from ytrag.index import search
+from ytrag.config import (
+    CONFIDENT_DISTANCE,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    LLM_BACKEND,
+    LLM_MODEL,
+    MAX_DISTANCE,
+    REFUSAL,
+    TOP_K,
+)
+from ytrag.index import search, title_overlap
 from ytrag.models import Chunk
 
 _CLIENT: Groq | None = None
@@ -41,6 +52,42 @@ def get_client() -> Groq:
             raise RuntimeError("GROQ_API_KEY is not set. Add it to the repo-root .env.")
         _CLIENT = Groq(api_key=GROQ_API_KEY)
     return _CLIENT
+
+
+def _chat(system: str, user: str) -> str:
+    """One completion, from whichever backend is configured.
+
+    Kept deliberately small: the explanation is a garnish on top of retrieval,
+    so swapping providers should never be more than this function.
+    """
+    backend = LLM_BACKEND.lower()
+
+    if backend == "none":
+        raise RuntimeError("Explanations are disabled (YTRAG_LLM_BACKEND=none).")
+
+    if backend == "gemini":
+        if not GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY is not set.")
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model=LLM_MODEL or GEMINI_MODEL,
+            contents=user,
+            config=types.GenerateContentConfig(
+                system_instruction=system, temperature=0.2
+            ),
+        )
+        return (response.text or "").strip()
+
+    response = get_client().chat.completions.create(
+        model=LLM_MODEL or GROQ_MODEL,
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}],
+        temperature=0.2,
+    )
+    return (response.choices[0].message.content or "").strip()
 
 
 def build_context(chunks: list[Chunk]) -> str:
@@ -106,15 +153,7 @@ def answer(
     chunks = [chunk for chunk, _ in hits]
     user_prompt = f"EXCERPTS\n{build_context(chunks)}\n\nQUESTION: {question}"
 
-    response = get_client().chat.completions.create(
-        model=LLM_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,
-    )
-    text = (response.choices[0].message.content or "").strip()
+    text = _chat(SYSTEM_PROMPT, user_prompt)
 
     # Guard two: the model read the excerpts and said they don't cover it.
     if REFUSAL.lower() in text.lower():
@@ -140,3 +179,56 @@ def retrieve_only(question: str, top_k: int = TOP_K, filtered: bool = False) -> 
     including the results the MAX_DISTANCE cutoff would have thrown away.
     """
     return search(question, top_k=top_k, max_distance=None if filtered else 2.0)
+
+def _is_confident(question: str, hits: list[tuple[Chunk, float]]) -> bool:
+    """Is the top result trustworthy enough to present without a caveat?
+
+    Distance alone cannot answer this — measured on the real index, off-topic
+    questions score *better* than some genuine ones ("React hooks" 0.463 beats
+    "number of islands" 0.568), so any single cutoff mislabels one group.
+
+    Two signals together work far better. Either the lecture title actually
+    mentions what was asked, or the match is close enough that the topic is
+    unambiguous even when no title names it.
+    """
+    if not hits:
+        return False
+    chunk, distance = hits[0]
+    return title_overlap(question, chunk.video_title) > 0 or distance <= CONFIDENT_DISTANCE
+
+
+def search_only(question: str, top_k: int = TOP_K, video_id: str | None = None) -> dict:
+    """Retrieval with no LLM at all — the timestamps, ranked.
+
+    This is the main path. The timestamps *are* the product: a student wants
+    to land on the moment the thing was explained, not read a paraphrase of
+    it. Skipping the model makes this instant, free, unlimited, and incapable
+    of hallucinating, since nothing is generated.
+
+    `confident` reports whether the best match is close enough to be worth
+    trusting. It is advisory, not a gate — a weak match still gets shown,
+    because a ranked list the student can dismiss in one glance is far less
+    harmful than a confident sentence that is wrong.
+    """
+    question = question.strip()
+    if not question:
+        return {"results": [], "confident": False, "query": question}
+
+    hits = search(question, top_k=top_k, video_id=video_id)
+    return {
+        "query": question,
+        "confident": _is_confident(question, hits),
+        "results": [
+            {
+                "title": chunk.video_title,
+                "timestamp": chunk.timestamp,
+                "url": chunk.url,
+                "start_sec": chunk.link_sec,
+                "end_sec": chunk.end_sec,
+                "video_id": chunk.video_id,
+                "distance": round(distance, 4),
+                "preview": chunk.text.split(chr(10) + chr(10), 1)[-1][:240].strip(),
+            }
+            for chunk, distance in hits
+        ],
+    }

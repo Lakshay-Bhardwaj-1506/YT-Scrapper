@@ -100,7 +100,10 @@ COOKIES_FROM_BROWSER = os.getenv("YTRAG_COOKIES_FROM_BROWSER", "")
 COOKIES_FILE = os.getenv("YTRAG_COOKIES_FILE", "")
 
 
+# Leave QDRANT_URL unset and the index lives in a local folder instead — no
+# account, no Docker, no signup. Set it to use a hosted Qdrant cluster.
 QDRANT_URL = os.getenv("QDRANT_URL", "")
+QDRANT_PATH = Path(os.getenv("YTRAG_QDRANT_PATH", ROOT / "qdrant"))
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 # The collection name carries the embedding dim, so switching embedding
 # models can never hit a dimension-mismatch error against a live collection,
@@ -113,22 +116,50 @@ UPSERT_BATCH = int(os.getenv("YTRAG_UPSERT_BATCH", 128))
 # Retrieval + answering
 # ------------------------------------------------------------------
 TOP_K = int(os.getenv("YTRAG_TOP_K", 6))
-# Cosine distance = 1 - score. Anything above this is treated as "not really
-# about the question" and dropped before the LLM ever sees it.
+# Cosine distance = 1 - score. Results further than this are dropped before
+# the LLM sees them.
 #
-# 0.5, not the 0.75 the plan suggested. bge-m3 compresses its distances hard:
-# measured on Hinglish DSA text, on-topic queries land around 0.35-0.47 and
-# clearly off-topic ones ("React hooks", "capital of France") around 0.52-0.71.
-# A 0.75 cutoff never fires at all, which quietly disables the entire guard.
+# 0.60, measured against 20 in-syllabus and 10 off-topic questions on the full
+# 2933-chunk index. The two populations OVERLAP — the worst genuine question
+# ("number of islands", 0.568) scores worse than the best off-topic one
+# ("neural network backpropagation", 0.409) — so no single cutoff can separate
+# them. Tightening it to 0.50 silently refused real questions like "hashmap kab
+# use karna chahiye"; that is a worse failure than letting a junk chunk reach
+# the LLM, because the student is told their own lecture doesn't exist.
 #
-# This is still a starting point, not an answer. On a full index an off-topic
-# query has thousands more chances to find one spuriously close chunk, so the
-# off-topic floor drifts down. Re-tune against the golden set once the real
-# playlist is ingested — `ytrag search` prints the raw distances.
-MAX_DISTANCE = float(os.getenv("YTRAG_MAX_DISTANCE", 0.5))
+# So this is a coarse pre-filter, not the real guard. It removes the obviously
+# unrelated and keeps every genuine question; the model's own refusal, working
+# from the excerpts, does the semantic judgement. Measured at this value:
+# 20/20 real questions kept, 10/10 off-topic questions still refused.
+MAX_DISTANCE = float(os.getenv("YTRAG_MAX_DISTANCE", 0.6))
 
+# Below this, the top hit is a solid match and the UI says so plainly. Above
+# it the results are still shown, just flagged as weak — measured in-syllabus
+# questions land at 0.30-0.57, so this catches most genuine ones while marking
+# the tail honestly.
+CONFIDENT_DISTANCE = float(os.getenv("YTRAG_CONFIDENT_DISTANCE", 0.45))
+
+# How much a matching word in the lecture title improves a chunk's ranking,
+# in cosine-distance terms, per matched word. 0.06 is roughly one rank step
+# in the tightly-clustered band bge-m3 produces. Set to 0 to disable.
+TITLE_BOOST = float(os.getenv("YTRAG_TITLE_BOOST", 0.06))
+
+# The written explanation is OPTIONAL — /search returns the timestamps without
+# ever touching an LLM. This only configures the "explain" button.
+#
+# gemini is the default because its free tier is far more generous than Groq's
+# (Groq caps at ~200k tokens/day, which one classroom exhausts in an hour).
+_DEFAULT_BACKEND = (
+    "gemini"
+    if (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+    else ("groq" if os.getenv("GROQ_API_KEY") else "none")
+)
+LLM_BACKEND = os.getenv("YTRAG_LLM_BACKEND", _DEFAULT_BACKEND)  # gemini | groq | none
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-LLM_MODEL = os.getenv("YTRAG_LLM_MODEL", "openai/gpt-oss-120b")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+LLM_MODEL = os.getenv("YTRAG_LLM_MODEL", "")  # blank = per-backend default
+GROQ_MODEL = os.getenv("YTRAG_GROQ_MODEL", "openai/gpt-oss-120b")
+GEMINI_MODEL = os.getenv("YTRAG_GEMINI_MODEL", "gemini-2.0-flash")
 
 # The exact string the system says when retrieval comes back empty. Kept here
 # because evaluate.py and the frontend both need to recognise it.

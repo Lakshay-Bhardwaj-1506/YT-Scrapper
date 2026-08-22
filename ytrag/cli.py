@@ -11,6 +11,7 @@
 """
 
 import json
+import sys
 from pathlib import Path
 
 import typer
@@ -52,6 +53,15 @@ from ytrag.transcribe import (
     transcribe,
     transcript_path,
 )
+
+# Windows consoles still default to cp1252, which cannot encode the box-drawing
+# and arrow characters rich uses — output crashes with UnicodeEncodeError partway
+# through a table. Force UTF-8 before anything prints.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 app = typer.Typer(add_completion=False, help="Timestamp-level RAG over a YouTube lecture playlist.")
 console = Console()
@@ -621,8 +631,8 @@ def preflight(playlist: str = typer.Option("", "--playlist", "-p", help="Also ch
     if playlist:
         check("playlist lists", lambda: f"{len(list_playlist(playlist))} videos")
 
-    console.print("\n[bold]LLM[/bold]")
-    check("groq responds", lambda: _probe_groq())
+    console.print("\n[bold]LLM (optional - search works without it)[/bold]")
+    check(f"{config.LLM_BACKEND} responds", _probe_llm)
 
     if ok:
         console.print("\n[bold green]All preflight checks passed.[/bold green]")
@@ -652,15 +662,14 @@ def _probe_run_whisper() -> str:
     return "reached faster-whisper cleanly"
 
 
-def _probe_groq() -> str:
-    from ytrag.answer import get_client as groq_client
+def _probe_llm() -> str:
+    """Exercise whichever backend is configured, not a hardcoded one."""
+    from ytrag.answer import _chat
 
-    response = groq_client().chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=[{"role": "user", "content": "reply with: ok"}],
-        max_tokens=5,
-    )
-    return (response.choices[0].message.content or "").strip()[:12]
+    if config.LLM_BACKEND == "none":
+        return "disabled (retrieval still works)"
+    reply = _chat("Reply with exactly: ok", "ok?")
+    return f"{config.LLM_BACKEND}: {reply.strip()[:12]}"
 
 
 def _bundled_transcripts() -> Path | None:
@@ -746,7 +755,8 @@ def serve(
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    console.print(f"[bold green]http://{host}:{port}[/bold green]")
+    console.print(f"[dim]Starting… the embedding model loads first (a few seconds).[/dim]")
+    console.print(f"[bold green]http://{host}:{port}[/bold green]  [dim](Ctrl-C to stop)[/dim]")
 
     if reload:
         # --reload needs an import string, and the reloader spawns a fresh
