@@ -672,6 +672,51 @@ def _probe_llm() -> str:
     return f"{config.LLM_BACKEND}: {reply.strip()[:12]}"
 
 
+def _bundled_vectors() -> Path | None:
+    """The prebuilt index committed to the repo, if there is one."""
+    f = Path(__file__).resolve().parent.parent / "index" / "vectors.npz"
+    return f if f.exists() else None
+
+
+@app.command()
+def export_vectors_cmd(
+    dest: Path = typer.Option(None, "--out", help="Defaults to ./index/vectors.npz"),
+):
+    """Save the built index so others can load it without embedding anything."""
+    from ytrag.index import export_vectors
+
+    target = dest or (Path(__file__).resolve().parent.parent / "index" / "vectors.npz")
+    info = export_vectors(target)
+    console.print(
+        f"Exported [bold]{info['count']}[/bold] vectors "
+        f"({info['mb']:.1f} MB) to {target}"
+    )
+    console.print("[dim]Commit this. Anyone who clones can then run `ytrag load`.[/dim]")
+
+
+@app.command()
+def load(
+    path: Path = typer.Option(None, "--path", help="Defaults to the repo's index/vectors.npz"),
+):
+    """Load the prebuilt index. Seconds, instead of minutes of embedding."""
+    from ytrag.index import import_vectors
+
+    source = path or _bundled_vectors()
+    if source is None:
+        console.print(
+            "[yellow]No prebuilt index found.[/yellow] Run `ytrag reindex` to build one."
+        )
+        raise typer.Exit(1)
+
+    console.print(f"Loading prebuilt index from {source} …")
+    info = import_vectors(source)
+    console.print(
+        f"[bold green]Loaded {info['count']} chunks[/bold green] "
+        f"(embedded with {info['model']})."
+    )
+    console.print("[dim]Now run `ytrag serve`.[/dim]")
+
+
 def _bundled_transcripts() -> Path | None:
     """The repo's own transcripts/ folder, if it has anything in it.
 

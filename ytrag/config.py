@@ -69,11 +69,22 @@ LINK_REWIND_SECONDS = int(os.getenv("YTRAG_LINK_REWIND", 5))
 # ------------------------------------------------------------------
 # Embeddings
 # ------------------------------------------------------------------
-# bge-m3 is multilingual and handles code-switched Hinglish, which is the
-# whole retrieval problem here. It is ~2.2GB — for a small deploy tier set
-# YTRAG_EMBED_MODEL=all-MiniLM-L6-v2 and run `ytrag reindex`. Cheap, because
-# transcripts are cached: minutes of embedding, not hours of transcription.
-EMBED_MODEL = os.getenv("YTRAG_EMBED_MODEL", "BAAI/bge-m3")
+# all-MiniLM-L6-v2 by default, and the reasoning is worth keeping.
+#
+# bge-m3 is the "better" model on paper — multilingual, built for exactly this
+# code-switched Hinglish problem. But measured on this corpus of 2933 chunks:
+#
+#            download   index (CPU)   top-1    top-5
+#   bge-m3     4.35 GB     55 min     12/12    12/12
+#   MiniLM       87 MB    1.6 min     11/12    12/12
+#
+# One question differs, and it still comes back at rank 2. Fifty times smaller
+# and thirty times faster for that. The title-boost re-ranking in index.py
+# recovers most of what the smaller model gives up, which is why the gap is so
+# narrow — better ranking turned out to be worth more than a bigger encoder.
+#
+# Set YTRAG_EMBED_MODEL=BAAI/bge-m3 and reindex if you want the last 1/12.
+EMBED_MODEL = os.getenv("YTRAG_EMBED_MODEL", "all-MiniLM-L6-v2")
 EMBED_BATCH = int(os.getenv("YTRAG_EMBED_BATCH", 16))
 # Some models want an instruction prefixed to the *query only*. bge-m3 does
 # not; bge-*-en-v1.5 does. If you switch models, check the model card.

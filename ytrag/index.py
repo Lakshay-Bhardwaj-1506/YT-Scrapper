@@ -5,7 +5,10 @@ the collection name carries the embedding dim, and point IDs are derived from
 a stable chunk_id so re-ingesting overwrites instead of duplicating.
 """
 
+import json
 import re
+import uuid
+from pathlib import Path
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -29,7 +32,7 @@ from ytrag.config import (
     UPSERT_BATCH,
 )
 from ytrag.embed import get_embedder
-from ytrag.models import Chunk
+from ytrag.models import Chunk, _NAMESPACE
 from ytrag.util import with_retry
 
 _CLIENT: QdrantClient | None = None
@@ -290,3 +293,82 @@ def stats() -> dict:
         "embed_model": get_embedder().name,
         "videos": videos,
     }
+
+
+# ------------------------------------------------------------------
+# Shipping a prebuilt index
+# ------------------------------------------------------------------
+# Embedding 2933 chunks takes a couple of minutes on a decent CPU and rather
+# longer on a weak laptop. The vectors themselves are small — 2933 x 384
+# float16 is about 2 MB — so committing them means someone can clone the repo
+# and have a working index in seconds, without ever running the encoder over
+# the corpus. They still need the model to embed their own *queries*, which is
+# why the small one matters.
+
+def export_vectors(path: Path) -> dict:
+    """Dump every point's vector and payload to a compressed .npz."""
+    import numpy as np
+
+    client = get_client()
+    name = collection_name()
+    vectors, payloads = [], []
+
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=name, limit=512, offset=offset,
+            with_payload=True, with_vectors=True,
+        )
+        for point in points:
+            vectors.append(point.vector)
+            payloads.append(point.payload)
+        if offset is None:
+            break
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        vectors=np.array(vectors, dtype=np.float16),
+        payloads=np.array(json.dumps(payloads)),
+        model=np.array(get_embedder().name),
+        dim=np.array(get_embedder().dim),
+    )
+    return {"count": len(vectors), "mb": path.stat().st_size / 1024 / 1024}
+
+
+def import_vectors(path: Path, batch_size: int = UPSERT_BATCH) -> dict:
+    """Load a .npz built by export_vectors straight into the collection.
+
+    Refuses to load vectors built by a different embedding model — mixing them
+    would silently wreck retrieval, since a query encoded by one model is
+    meaningless against another's vectors.
+    """
+    import numpy as np
+
+    data = np.load(path, allow_pickle=False)
+    model = str(data["model"])
+    if model != get_embedder().name:
+        raise RuntimeError(
+            f"These vectors were built with {model}, but YTRAG_EMBED_MODEL is "
+            f"{get_embedder().name}. Set YTRAG_EMBED_MODEL={model}, or run "
+            f"`ytrag reindex` to rebuild with your model."
+        )
+
+    vectors = data["vectors"].astype("float32")
+    payloads = json.loads(str(data["payloads"]))
+    name = ensure_collection()
+    client = get_client()
+
+    for start in range(0, len(vectors), batch_size):
+        chunk_payloads = payloads[start : start + batch_size]
+        points = [
+            PointStruct(
+                id=str(uuid.uuid5(_NAMESPACE, p["chunk_id"])),
+                vector=v.tolist(),
+                payload=p,
+            )
+            for v, p in zip(vectors[start : start + batch_size], chunk_payloads)
+        ]
+        client.upsert(collection_name=name, points=points, wait=True)
+
+    return {"count": len(vectors), "model": model}
